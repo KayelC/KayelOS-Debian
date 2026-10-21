@@ -1,0 +1,508 @@
+diff --git a/suckless/dwm/dwm.c b/suckless/dwm/dwm.c
+index d08a984..0e1891c 100755
+--- a/suckless/dwm/dwm.c
++++ b/suckless/dwm/dwm.c
+@@ -76,7 +76,7 @@ enum { CurNormal, CurResize, CurMove, CurLast }; /* cursor */
+ enum { SchemeNorm, SchemeSel }; /* color schemes */
+ enum { NetSupported, NetWMName, NetWMState, NetWMCheck, NetSystemTray, NetSystemTrayOP, NetSystemTrayOrientation, NetSystemTrayOrientationHorz,
+        NetWMFullscreen, NetWMSticky, NetActiveWindow, NetWMWindowType,
+-       NetWMWindowTypeDialog, NetClientList, NetClientInfo, NetDesktopNames, NetDesktopViewport, NetNumberOfDesktops, NetCurrentDesktop, NetWMDesktop, NetMonTags, NetLast }; /* EWMH atoms */
++       NetWMWindowTypeDialog, NetWMWindowTypeDock, NetWMStrutPartial, NetWMStrut, NetClientList, NetClientInfo, NetDesktopNames, NetDesktopViewport, NetNumberOfDesktops, NetCurrentDesktop, NetWMDesktop, NetMonTags, NetSelTags, NetLayout, NetSetLayout, NetGaps, NetSetGaps, NetMfact, NetSetMfact, NetNmaster, NetSetNmaster, NetFollow, NetSetFollow, NetReloadColors, NetLast }; /* EWMH atoms */
+ enum { Manager, Xembed, XembedInfo, XLast }; /* Xembed atoms */
+ enum { WMProtocols, WMDelete, WMState, WMTakeFocus, WMLast }; /* default atoms */
+ enum { ClkTagBar, ClkLtSymbol, ClkStatusText, ClkWinTitle,
+@@ -146,6 +146,7 @@ struct Monitor {
+ 	unsigned int tagset[2];
+ 	int showbar;
+ 	int topbar;
++	int extbartop, extbarbot; /* space reserved for external (strut) bars */
+ 	Client *clients;
+ 	Client *sel;
+ 	Client *stack;
+@@ -172,6 +173,14 @@ struct Systray {
+ 	Client *icons;
+ };
+ 
++/* external bars (e.g. quickshell): unmanaged dock windows whose
++ * _NET_WM_STRUT(_PARTIAL) reserves screen space */
++typedef struct ExtBar ExtBar;
++struct ExtBar {
++	Window win;
++	ExtBar *next;
++};
++
+ /* Xresources preferences */
+ enum resource_type {
+ 	STRING = 0,
+@@ -287,7 +296,11 @@ static void unfocus(Client *c, int setfocus);
+ static void unmanage(Client *c, int destroyed);
+ static void unmapnotify(XEvent *e);
+ static void updatecurrentdesktop(void);
++static void updatelayoutprop(void);
+ static void updatebarpos(Monitor *m);
++static void updateextbars(void);
++static int extbarremove(Window w);
++static int winisdock(Window w);
+ static void updatebars(void);
+ static void updateclientlist(void);
+ static int updategeom(void);
+@@ -312,10 +325,12 @@ static int xerrorstart(Display *dpy, XErrorEvent *ee);
+ static void zoom(const Arg *arg);
+ static void autostart_exec(void);
+ static void load_xresources(void);
++static void reloadcolors(void);
+ static void resource_load(XrmDatabase db, char *name, enum resource_type rtype, void *dst);
+ 
+ /* variables */
+ static Systray *systray = NULL;
++static ExtBar *extbars = NULL;
+ static const char broken[] = "broken";
+ static char stext[1024];
+ static int screen;
+@@ -714,6 +729,16 @@ clientmessage(XEvent *e)
+ 
+ 	unsigned int i;
+ 
++	/* root-targeted pager request: _NET_CURRENT_DESKTOP -> view that tag
++	 * (lets the external bar switch tags via xdotool set_desktop) */
++	if (cme->message_type == netatom[NetCurrentDesktop]) {
++		if ((unsigned long)cme->data.l[0] < LENGTH(tags)) {
++			const Arg a = {.ui = 1 << cme->data.l[0]};
++			view(&a);
++		}
++		return;
++	}
++
+ 	if (!c)
+ 		return;
+ 	if (cme->message_type == netatom[NetWMState]) {
+@@ -734,6 +759,18 @@ clientmessage(XEvent *e)
+ 			focus(c);
+ 			restack(selmon);
+ 		}
++	} else if (cme->message_type == netatom[NetWMDesktop]) {
++		/* pager request: move client to a tag (xdotool set_desktop_for_window) */
++		unsigned long d = cme->data.l[0];
++		if (d == 0xFFFFFFFFUL)
++			c->tags = TAGMASK;
++		else if (d < LENGTH(tags))
++			c->tags = 1 << d;
++		else
++			return;
++		setclienttagprop(c);
++		focus(NULL);
++		arrange(c->mon);
+ 	}
+ }
+ 
+@@ -878,6 +915,8 @@ destroynotify(XEvent *e)
+ 
+ 	if ((c = wintoclient(ev->window)))
+ 		unmanage(c, 1);
++	else if (extbarremove(ev->window))
++		updateextbars();
+ 	else if ((c = wintosystrayicon(ev->window))) {
+ 		removesystrayicon(c);
+ 		resizebarwin(selmon);
+@@ -1178,6 +1217,7 @@ focusmon(const Arg *arg)
+ 	unfocus(selmon->sel, 0);
+ 	selmon = m;
+ 	focus(NULL);
++	updatecurrentdesktop(); /* refresh root tag state for the external bar */
+ }
+ 
+ void
+@@ -1344,6 +1384,7 @@ void
+ incnmaster(const Arg *arg)
+ {
+ 	selmon->nmaster = selmon->pertag->nmasters[selmon->pertag->curtag] = MAX(selmon->nmaster + arg->i, 0);
++	updatelayoutprop();
+ 	arrange(selmon);
+ }
+ 
+@@ -1399,6 +1440,19 @@ manage(Window w, XWindowAttributes *wa)
+ 	Window trans = None;
+ 	XWindowChanges wc;
+ 
++	/* dock windows (external bars) are adopted, never managed: no Client,
++	 * no tiling, no _NET_CLIENT_LIST entry; their struts reserve space */
++	if (winisdock(w)) {
++		ExtBar *eb = ecalloc(1, sizeof(ExtBar));
++		eb->win = w;
++		eb->next = extbars;
++		extbars = eb;
++		XSelectInput(dpy, w, PropertyChangeMask|StructureNotifyMask);
++		XMapRaised(dpy, w);
++		updateextbars();
++		return;
++	}
++
+ 	c = ecalloc(1, sizeof(Client));
+ 	c->win = w;
+ 	/* geometry */
+@@ -1631,6 +1685,70 @@ propertynotify(XEvent *e)
+ 		updatesystray();
+ 	}
+ 
++	{
++		ExtBar *eb;
++		for (eb = extbars; eb; eb = eb->next)
++			if (ev->window == eb->win) {
++				if (ev->atom == netatom[NetWMStrutPartial]
++				|| ev->atom == netatom[NetWMStrut])
++					updateextbars(); /* live re-tile when the bar resizes */
++				return;
++			}
++	}
++
++	if (ev->window == root && ev->atom == netatom[NetReloadColors]) {
++		if (ev->state != PropertyDelete)
++			reloadcolors();
++		return;
++	}
++
++	if (ev->window == root
++	&& (ev->atom == netatom[NetSetLayout] || ev->atom == netatom[NetSetGaps]
++	|| ev->atom == netatom[NetSetMfact] || ev->atom == netatom[NetSetNmaster]
++	|| ev->atom == netatom[NetSetFollow])) {
++		/* external bar requests, one cardinal each: layouts[] index,
++		 * gap size, mfact percent, master count. Property writes rather
++		 * than ClientMessages so plain `xprop -set` can drive them. */
++		Atom da;
++		int di;
++		unsigned long nitems = 0, dl;
++		unsigned char *p = NULL;
++		if (ev->state != PropertyDelete
++		&& XGetWindowProperty(dpy, root, ev->atom, 0L, 1L, False,
++				XA_CARDINAL, &da, &di, &nitems, &dl, &p) == Success && p) {
++			unsigned long v = *(unsigned long *)p;
++			XFree(p);
++			if (!nitems)
++				return;
++			if (ev->atom == netatom[NetSetLayout]) {
++				/* same-layout requests are dropped: bare setlayout()
++				 * would toggle sellt back to the previous layout */
++				if (v < LENGTH(layouts) - 1
++				&& &layouts[v] != selmon->lt[selmon->sellt]) {
++					const Arg a = {.v = &layouts[v]};
++					setlayout(&a);
++				}
++			} else if (ev->atom == netatom[NetSetGaps]) {
++				if (v <= 100)
++					setgaps(v, v, v, v);
++			} else if (ev->atom == netatom[NetSetMfact]) {
++				if (v >= 5 && v <= 95) {
++					const Arg a = {.f = v / 100.0 + 1.0}; /* >1.0 = absolute */
++					setmfact(&a);
++				}
++			} else if (ev->atom == netatom[NetSetNmaster]) {
++				if (v <= 15) {
++					const Arg a = {.i = (int)v - selmon->nmaster};
++					incnmaster(&a);
++				}
++			} else { /* NetSetFollow */
++				if (v <= 1 && (v == 1) != (selmon->wfsymbol[0] == WFACTIVE))
++					togglefollow(NULL);
++			}
++		}
++		return;
++	}
++
+     if ((ev->window == root) && (ev->atom == XA_WM_NAME))
+ 		updatestatus();
+ 	else if (ev->state == PropertyDelete)
+@@ -2012,6 +2130,7 @@ setlayout(const Arg *arg)
+ 	if (arg && arg->v)
+ 		selmon->lt[selmon->sellt] = selmon->pertag->ltidxs[selmon->pertag->curtag][selmon->sellt] = (Layout *)arg->v;
+ 	strncpy(selmon->ltsymbol, selmon->lt[selmon->sellt]->symbol, sizeof selmon->ltsymbol);
++	updatelayoutprop();
+ 	if (selmon->sel)
+ 		arrange(selmon);
+ 	else
+@@ -2051,6 +2170,7 @@ setmfact(const Arg *arg)
+ 	if (f < 0.05 || f > 0.95)
+ 		return;
+ 	selmon->mfact = selmon->pertag->mfacts[selmon->pertag->curtag] = f;
++	updatelayoutprop();
+ 	arrange(selmon);
+ }
+ 
+@@ -2148,6 +2268,10 @@ setup(void)
+ 	netatom[NetWMSticky] = XInternAtom(dpy, "_NET_WM_STATE_STICKY", False);
+ 	netatom[NetWMWindowType] = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
+ 	netatom[NetWMWindowTypeDialog] = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DIALOG", False);
++	netatom[NetWMWindowTypeDock] = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
++	netatom[NetWMStrutPartial] = XInternAtom(dpy, "_NET_WM_STRUT_PARTIAL", False);
++	netatom[NetWMStrut] = XInternAtom(dpy, "_NET_WM_STRUT", False);
++	netatom[NetSelTags] = XInternAtom(dpy, "_DWM_SELTAGS", False);
+ 	netatom[NetClientList] = XInternAtom(dpy, "_NET_CLIENT_LIST", False);
+ 	netatom[NetClientInfo] = XInternAtom(dpy, "_NET_CLIENT_INFO", False);
+     netatom[NetDesktopViewport] = XInternAtom(dpy, "_NET_DESKTOP_VIEWPORT", False);
+@@ -2156,6 +2280,17 @@ setup(void)
+ 	netatom[NetDesktopNames] = XInternAtom(dpy, "_NET_DESKTOP_NAMES", False);
+ 	netatom[NetWMDesktop] = XInternAtom(dpy, "_NET_WM_DESKTOP", False);
+ 	netatom[NetMonTags] = XInternAtom(dpy, "_DWM_MONTAGS", False);
++	netatom[NetLayout] = XInternAtom(dpy, "_DWM_LAYOUT", False);
++	netatom[NetSetLayout] = XInternAtom(dpy, "_DWM_SETLAYOUT", False);
++	netatom[NetGaps] = XInternAtom(dpy, "_DWM_GAPS", False);
++	netatom[NetSetGaps] = XInternAtom(dpy, "_DWM_SETGAPS", False);
++	netatom[NetMfact] = XInternAtom(dpy, "_DWM_MFACT", False);
++	netatom[NetSetMfact] = XInternAtom(dpy, "_DWM_SETMFACT", False);
++	netatom[NetNmaster] = XInternAtom(dpy, "_DWM_NMASTER", False);
++	netatom[NetSetNmaster] = XInternAtom(dpy, "_DWM_SETNMASTER", False);
++	netatom[NetFollow] = XInternAtom(dpy, "_DWM_FOLLOW", False);
++	netatom[NetSetFollow] = XInternAtom(dpy, "_DWM_SETFOLLOW", False);
++	netatom[NetReloadColors] = XInternAtom(dpy, "_DWM_RELOADCOLORS", False);
+ 	xatom[Manager] = XInternAtom(dpy, "MANAGER", False);
+ 	xatom[Xembed] = XInternAtom(dpy, "_XEMBED", False);
+ 	xatom[XembedInfo] = XInternAtom(dpy, "_XEMBED_INFO", False);
+@@ -2188,6 +2323,10 @@ setup(void)
+ 	setcurrentdesktop();
+ 	setdesktopnames();
+ 	setviewport();
++	/* restore the pre-restart view BEFORE the seed below overwrites the
++	 * saved _DWM_MONTAGS — seeding first left every restart on tag 1 */
++	restoremonitortagsets();
++	updatecurrentdesktop(); /* seed _DWM_SELTAGS/_DWM_MONTAGS for the bar */
+ 	XDeleteProperty(dpy, root, netatom[NetClientList]);
+ 	XDeleteProperty(dpy, root, netatom[NetClientInfo]);
+ 	/* select events */
+@@ -2313,6 +2452,9 @@ setclienttagprop(Client *c)
+ 	}
+ 	XChangeProperty(dpy, c->win, netatom[NetWMDesktop], XA_CARDINAL, 32,
+ 			PropModeReplace, (unsigned char *) &desktop, 1);
++	/* root-property heartbeat: every client tag change fires a PropertyNotify
++	 * the external bar's xprop spy can react to (occupancy refresh) */
++	updatecurrentdesktop();
+ }
+ 
+ void
+@@ -2388,6 +2530,7 @@ tagtoleft(const Arg *arg) {
+ 	&& __builtin_popcount(selmon->tagset[selmon->seltags] & TAGMASK) == 1
+ 	&& selmon->tagset[selmon->seltags] > 1) {
+ 		selmon->sel->tags >>= 1;
++		setclienttagprop(selmon->sel);
+ 		focus(NULL);
+ 		arrange(selmon);
+ 	}
+@@ -2399,6 +2542,7 @@ tagtoright(const Arg *arg) {
+ 	&& __builtin_popcount(selmon->tagset[selmon->seltags] & TAGMASK) == 1
+ 	&& selmon->tagset[selmon->seltags] & (TAGMASK >> 1)) {
+ 		selmon->sel->tags <<= 1;
++		setclienttagprop(selmon->sel);
+ 		focus(NULL);
+ 		arrange(selmon);
+ 	}
+@@ -2430,6 +2574,7 @@ void
+ togglefollow(const Arg *arg)
+ {
+ 	selmon->wfsymbol[0] = (selmon->wfsymbol[0] == WFACTIVE) ? WFINACTIVE : WFACTIVE;
++	updatelayoutprop();
+ 	drawbars();
+ }
+ 
+@@ -2530,6 +2675,7 @@ toggleview(const Arg *arg)
+ 
+ 		focus(NULL);
+ 		arrange(selmon);
++		updatecurrentdesktop();
+ 	}
+ }
+ 
+@@ -2584,6 +2730,8 @@ unmapnotify(XEvent *e)
+ 		else
+ 			unmanage(c, 0);
+ 	}
++	else if (extbarremove(ev->window))
++		updateextbars();
+ 	else if ((c = wintosystrayicon(ev->window))) {
+ 		/* KLUDGE! sometimes icons occasionally unmap their windows, but do
+ 		 * _not_ destroy them. We map those windows back */
+@@ -2620,11 +2768,102 @@ updatebars(void)
+ 	}
+ }
+ 
++int
++winisdock(Window w)
++{
++	int di, ret = 0;
++	unsigned long i, nitems, dl;
++	unsigned char *p = NULL;
++	Atom da;
++
++	if (XGetWindowProperty(dpy, w, netatom[NetWMWindowType], 0L, 8L, False,
++		XA_ATOM, &da, &di, &nitems, &dl, &p) == Success && p) {
++		for (i = 0; i < nitems; i++)
++			if (((Atom *)p)[i] == netatom[NetWMWindowTypeDock])
++				ret = 1;
++		XFree(p);
++	}
++	return ret;
++}
++
++int
++extbarremove(Window w)
++{
++	ExtBar *eb, **peb;
++
++	for (peb = &extbars; (eb = *peb); peb = &eb->next)
++		if (eb->win == w) {
++			*peb = eb->next;
++			free(eb);
++			return 1;
++		}
++	return 0;
++}
++
++void
++updateextbars(void)
++{
++	Monitor *m;
++	ExtBar *eb, **peb;
++	XWindowAttributes wa;
++	int format;
++	unsigned long n, extra;
++	unsigned long *strut;
++	Atom real;
++	long top, bottom;
++
++	for (m = mons; m; m = m->next)
++		m->extbartop = m->extbarbot = 0;
++	for (peb = &extbars; (eb = *peb);) {
++		if (!XGetWindowAttributes(dpy, eb->win, &wa)) {
++			*peb = eb->next;
++			free(eb);
++			continue;
++		}
++		/* struts are root-relative: top counts down from y=0,
++		 * bottom counts up from the bottom edge of the X screen */
++		top = bottom = 0;
++		strut = NULL;
++		if (XGetWindowProperty(dpy, eb->win, netatom[NetWMStrutPartial], 0L, 12L,
++			False, XA_CARDINAL, &real, &format, &n, &extra,
++			(unsigned char **)&strut) == Success && strut && n >= 4) {
++			top = strut[2];
++			bottom = strut[3];
++		}
++		if (strut)
++			XFree(strut);
++		if (!top && !bottom) {
++			strut = NULL;
++			if (XGetWindowProperty(dpy, eb->win, netatom[NetWMStrut], 0L, 4L,
++				False, XA_CARDINAL, &real, &format, &n, &extra,
++				(unsigned char **)&strut) == Success && strut && n >= 4) {
++				top = strut[2];
++				bottom = strut[3];
++			}
++			if (strut)
++				XFree(strut);
++		}
++		m = recttomon(wa.x, wa.y, wa.width, wa.height);
++		if (top)
++			m->extbartop = MAX(m->extbartop, (int)top - m->my);
++		if (bottom)
++			m->extbarbot = MAX(m->extbarbot, (int)bottom - (sh - m->my - m->mh));
++		peb = &eb->next;
++	}
++	for (m = mons; m; m = m->next) {
++		updatebarpos(m);
++		arrange(m);
++	}
++}
++
+ void
+ updatebarpos(Monitor *m)
+ {
+ 	m->wy = m->my;
+ 	m->wh = m->mh;
++	/* external bar reservation first, so the native bar stacks inside it */
++	m->wy += m->extbartop;
++	m->wh -= m->extbartop + m->extbarbot;
+ 	if (m->showbar) {
+ 		m->wh = m->wh - vertpad - bh;
+ 		m->by = m->topbar ? m->wy : m->wy + m->wh + vertpad;
+@@ -2654,6 +2893,34 @@ void updatecurrentdesktop(void){
+ 	}
+ 	long data[] = { i };
+ 	XChangeProperty(dpy, root, netatom[NetCurrentDesktop], XA_CARDINAL, 32, PropModeReplace, (unsigned char *)data, 1);
++	/* _NET_CURRENT_DESKTOP is lossy (highest bit) — also publish the raw
++	 * tagset bitmask and live per-monitor tagsets for the external bar */
++	XChangeProperty(dpy, root, netatom[NetSelTags], XA_CARDINAL, 32, PropModeReplace, (unsigned char *)rawdata, 1);
++	savemonitortagsets();
++	updatelayoutprop();
++}
++
++void updatelayoutprop(void){
++	/* publish the selected monitor's layout (a layouts[] index), gap size,
++	 * mfact (as a percent) and nmaster for the external bar's picker;
++	 * pertag swaps all of these on view changes too, so this rides the
++	 * updatecurrentdesktop heartbeat as well as the individual setters */
++	long data[] = { 0 };
++	unsigned int i;
++	for (i = 0; i < LENGTH(layouts) && layouts[i].symbol; i++)
++		if (selmon->lt[selmon->sellt] == &layouts[i]) {
++			data[0] = i;
++			break;
++		}
++	XChangeProperty(dpy, root, netatom[NetLayout], XA_CARDINAL, 32, PropModeReplace, (unsigned char *)data, 1);
++	data[0] = selmon->gappoh;
++	XChangeProperty(dpy, root, netatom[NetGaps], XA_CARDINAL, 32, PropModeReplace, (unsigned char *)data, 1);
++	data[0] = (long)(selmon->mfact * 100 + 0.5);
++	XChangeProperty(dpy, root, netatom[NetMfact], XA_CARDINAL, 32, PropModeReplace, (unsigned char *)data, 1);
++	data[0] = selmon->nmaster;
++	XChangeProperty(dpy, root, netatom[NetNmaster], XA_CARDINAL, 32, PropModeReplace, (unsigned char *)data, 1);
++	data[0] = selmon->wfsymbol[0] == WFACTIVE;
++	XChangeProperty(dpy, root, netatom[NetFollow], XA_CARDINAL, 32, PropModeReplace, (unsigned char *)data, 1);
+ }
+ 
+ int
+@@ -3191,6 +3458,29 @@ load_xresources(void)
+ 	XCloseDisplay(display);
+ }
+ 
++void
++reloadcolors(void)
++{
++	/* re-read Xresources and restyle in place — no re-exec, so the
++	 * selected tags and all pertag state survive a theme change */
++	Client *c;
++	Monitor *m;
++	unsigned int i;
++
++	load_xresources();
++	for (i = 0; i < LENGTH(colors); i++) {
++		drw_scm_free(drw, scheme[i], 3);
++		scheme[i] = drw_scm_create(drw, colors[i], 3);
++	}
++	drw_scm_free(drw, scheme[LENGTH(colors)], 3);
++	scheme[LENGTH(colors)] = drw_scm_create(drw, colors[0], 3);
++	for (m = mons; m; m = m->next)
++		for (c = m->clients; c; c = c->next)
++			XSetWindowBorder(dpy, c->win, scheme[c == selmon->sel
++				? SchemeSel : SchemeNorm][ColBorder].pixel);
++	drawbars();
++}
++
+ int
+ main(int argc, char *argv[])
+ {
+@@ -3211,7 +3501,6 @@ main(int argc, char *argv[])
+ 	if (pledge("stdio rpath proc exec", NULL) == -1)
+ 		die("pledge");
+ #endif /* __OpenBSD__ */
+-	restoremonitortagsets();
+ 	scan();
+ 	run();
+ 	if(restart) execvp(argv[0], argv);
+diff --git a/suckless/dwm/vanitygaps.c b/suckless/dwm/vanitygaps.c
+index 8e0cdec..816b42c 100755
+--- a/suckless/dwm/vanitygaps.c
++++ b/suckless/dwm/vanitygaps.c
+@@ -45,6 +45,7 @@ setgaps(int oh, int ov, int ih, int iv)
+ 	selmon->gappov = ov;
+ 	selmon->gappih = ih;
+ 	selmon->gappiv = iv;
++	updatelayoutprop(); /* keep _DWM_GAPS honest for the bar's picker */
+ 	arrange(selmon);
+ }
+ 

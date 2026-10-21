@@ -1,0 +1,34 @@
+# KayelOS build artifacts
+*.iso
+*.img
+*.qcow2
+*.vmdk
+*.ova
+*.ovf
+
+# Checksums generated locally
+*.sha256.tmp
+
+# Eggs build directories
+isodir/
+work/
+build/
+output/
+
+# User/private files
+.ssh/
+.gnupg/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Shell/editor junk
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+*.o

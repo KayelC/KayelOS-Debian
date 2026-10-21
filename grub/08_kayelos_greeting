@@ -1,0 +1,41 @@
+#!/bin/sh
+
+THEME="/usr/share/grub/themes/sleek/theme.txt"
+TEMPLATE="/usr/share/grub/themes/sleek/theme.txt.kayelos"
+
+[ -f "$TEMPLATE" ] || exit 0
+
+# Find the primary normal user (usually UID 1000).
+ENTRY="$(
+    getent passwd |
+    awk -F: '
+        $3 >= 1000 && $3 < 65534 && $7 !~ /(nologin|false)$/ {
+            if (uid == "" || $3 < uid) {
+                uid=$3
+                line=$0
+            }
+        }
+        END { print line }
+    '
+)"
+
+NAME=""
+
+if [ -n "$ENTRY" ]; then
+    # GECOS/full-name field
+    NAME="$(printf '%s\n' "$ENTRY" | cut -d: -f5 | cut -d, -f1)"
+
+    # Use first name only: "Kayel Calleja" -> "Kayel"
+    NAME="${NAME%% *}"
+fi
+
+[ -n "$NAME" ] || NAME="there"
+
+# Keep the generated GRUB theme syntax safe.
+NAME="$(printf '%s' "$NAME" | tr -d '\r\n"\\')"
+SAFE_NAME="$(printf '%s' "$NAME" | sed 's/[\/&]/\\&/g')"
+
+sed "s/__KAYELOS_NAME__/${SAFE_NAME}/g" \
+    "$TEMPLATE" > "$THEME"
+
+exit 0

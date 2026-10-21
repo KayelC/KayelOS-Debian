@@ -1,0 +1,6 @@
+#!/bin/sh
+
+/usr/bin/pkexec /usr/bin/eggs sysinstall calamares
+status=$?
+
+exit "$status"

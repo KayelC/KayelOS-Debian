@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+# This fix is exclusively for the KayelOS live environment.
+# Installed systems must not receive an installer launcher.
+if ! grep -qw 'boot=live' /proc/cmdline; then
+    exit 0
+fi
+
+APPDIR="/usr/share/applications"
+
+# Penguins' Eggs currently generates:
+#   pkexec eggs sysinstall
+# but its current sysinstall implementation requires an explicit engine.
+#
+# Disable the Eggs-generated launcher and replace it with our correct one.
+
+if [ -f "$APPDIR/install-system.desktop" ]; then
+    mv "$APPDIR/install-system.desktop" \
+       "$APPDIR/install-system.desktop.eggs-disabled"
+fi
+
+cat >"$APPDIR/install-kayelos.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Install KayelOS
+GenericName=System Installer
+Comment=Install KayelOS to your computer
+Exec=/usr/local/bin/kayelos-installer
+Icon=kayelos
+Terminal=false
+Categories=System;
+DESKTOP
+
+chmod 644 "$APPDIR/install-kayelos.desktop"
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$APPDIR" >/dev/null 2>&1 || true
+fi

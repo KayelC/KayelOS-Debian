@@ -1,0 +1,16 @@
+/* Generated from wallpaper: ign_unsplash51.png */
+
+* {
+    bg:          #233143;
+    fg:          #d2cbbc;
+    accent:      #809bbd;
+    accent-2:    #ce858c;
+    border:      #809bbd;
+    urgent:      #ce858c;
+    selected-fg: #d2cbbc;
+    entry-fg:    #ce858c;
+    prompt-fg:   #809bbd;
+    header:      #ce858c;
+
+    background-color: @bg;
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=Prepare KayelOS live installer launcher
+After=local-fs.target
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/kayelos-live-installer-fix
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

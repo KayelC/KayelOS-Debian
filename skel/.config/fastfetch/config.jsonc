@@ -1,0 +1,63 @@
+{
+    "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+
+    "logo": {
+        "type": "file",
+        "source": "/usr/share/kayelos/fastfetch/kayelos-50-colored.txt",
+        "padding": {
+            "top": 4,
+            "left": 0,
+            "right": 6
+        },
+        "color": {
+            "1": "38;2;245;245;245",
+            "2": "38;2;248;144;128",
+            "3": "38;2;128;176;208"
+        }
+    },
+
+    "display": {
+        "separator": ": " 
+    },
+
+    "modules": [
+        {
+            "type": "title"
+        },
+        {
+            "type": "separator",
+            "string": "─",
+            "times": 8
+        },
+        {
+            "type": "os",
+            "format": "KayelOS {arch}"
+        },
+        "host",
+        "kernel",
+        "uptime",
+        "packages",
+        "shell",
+        "display",
+        "de",
+        "wm",
+        "wmtheme",
+        "theme",
+        "icons",
+        "font",
+        "cursor",
+        "terminal",
+        "terminalfont",
+        "cpu",
+        "gpu",
+        "memory",
+        "swap",
+        "disk",
+        "localip",
+        "battery",
+        "poweradapter",
+        "locale",
+        "break",
+        "colors"
+    ]
+}

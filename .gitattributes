@@ -1,0 +1,2 @@
+skel/.config/suckless/wallpaper/*.png filter=lfs diff=lfs merge=lfs -text
+skel/.config/suckless/wallpaper/*.jpg filter=lfs diff=lfs merge=lfs -text
