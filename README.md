@@ -3,8 +3,7 @@
 KayelOS is a Debian 13 based Linux environment built for classroom,
 development, and everyday use.
 
-It combines a lightweight DWM desktop with QuickShell, development tools,
-custom KayelOS branding, and an installable live environment.
+It combines a lightweight DWM desktop with QuickShell, development tools, and an installable live environment.
 
 ## Current release
 
